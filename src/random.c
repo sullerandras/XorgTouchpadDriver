@@ -188,6 +188,9 @@ static void RandomUnInit(InputDriverPtr drv,
     {
         xfree(pRandom->device);
         pRandom->device = NULL;
+        /* Common error - pInfo->private must be NULL or valid memoy before
+         * passing into xf86DeleteInput */
+        pInfo->private = NULL;
     }
     xf86DeleteInput(pInfo, 0);
 }
