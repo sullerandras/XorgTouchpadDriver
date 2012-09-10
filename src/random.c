@@ -66,7 +66,7 @@
 
 #include "random.h"
 
-static InputInfoPtr RandomPreInit(InputDriverPtr  drv, IDevPtr dev, int flags);
+static int RandomPreInit(InputDriverPtr  drv, InputInfoPtr pInfo, int flags);
 static void RandomUnInit(InputDriverPtr drv, InputInfoPtr pInfo, int flags);
 static pointer RandomPlug(pointer module, pointer options, int *errmaj, int  *errmin);
 static void RandomUnplug(pointer p);
@@ -75,11 +75,13 @@ static int RandomControl(DeviceIntPtr    device,int what);
 static int _random_init_buttons(DeviceIntPtr device);
 static int _random_init_axes(DeviceIntPtr device);
 
-
+/* random_driver_name[] fixes a gcc warning:
+ * "initialization discards 'const' qualifier from pointer target type" */
+static char random_driver_name[] = "random";
 
 _X_EXPORT InputDriverRec RANDOM = {
     1,
-    "random",
+    random_driver_name,
     NULL,
     RandomPreInit,
     RandomUnInit,
@@ -124,41 +126,34 @@ RandomPlug(pointer        module,
     return module;
 };
 
-static InputInfoPtr RandomPreInit(InputDriverPtr  drv,
-                                  IDevPtr         dev,
-                                  int             flags)
+static int RandomPreInit(InputDriverPtr  drv,
+                         InputInfoPtr    pInfo,
+                         int             flags)
 {
-    InputInfoPtr        pInfo;
     RandomDevicePtr    pRandom;
 
 
-    if (!(pInfo = xf86AllocateInput(drv, 0)))
-        return NULL;
-
-    pRandom = xcalloc(1, sizeof(RandomDeviceRec));
+    pRandom = calloc(1, sizeof(RandomDeviceRec));
     if (!pRandom) {
         pInfo->private = NULL;
         xf86DeleteInput(pInfo, 0);
-        return NULL;
+        return BadAlloc;
     }
 
     pInfo->private = pRandom;
-    pInfo->name = xstrdup(dev->identifier);
-    pInfo->flags = 0;
-    pInfo->type_name = XI_MOUSE; /* see XI.h */
-    pInfo->conf_idev = dev;
+    pInfo->type_name = strdup(XI_MOUSE); /* see XI.h */
     pInfo->read_input = RandomReadInput; /* new data avl */
     pInfo->switch_mode = NULL; /* toggle absolute/relative mode */
     pInfo->device_control = RandomControl; /* enable/disable dev */
     /* process driver specific options */
-    pRandom->device = xf86SetStrOption(dev->commonOptions,
-                                         "Device",
-                                         "/dev/random");
+    pRandom->device = xf86SetStrOption(pInfo->options,
+                                       "Device",
+                                       "/dev/random");
 
     xf86Msg(X_INFO, "%s: Using device %s.\n", pInfo->name, pRandom->device);
 
     /* process generic options */
-    xf86CollectInputOptions(pInfo, NULL, NULL);
+    xf86CollectInputOptions(pInfo, NULL);
     xf86ProcessCommonOptions(pInfo, pInfo->options);
     /* Open sockets, init device files, etc. */
     SYSCALL(pInfo->fd = open(pRandom->device, O_RDWR | O_NONBLOCK));
@@ -167,16 +162,14 @@ static InputInfoPtr RandomPreInit(InputDriverPtr  drv,
         xf86Msg(X_ERROR, "%s: failed to open %s.",
                 pInfo->name, pRandom->device);
         pInfo->private = NULL;
-        xfree(pRandom);
+        free(pRandom);
         xf86DeleteInput(pInfo, 0);
-        return NULL;
+        return BadAccess;
     }
     /* do more funky stuff */
     close(pInfo->fd);
     pInfo->fd = -1;
-    pInfo->flags |= XI86_OPEN_ON_INIT;
-    pInfo->flags |= XI86_CONFIGURED;
-    return pInfo;
+    return Success;
 }
 
 static void RandomUnInit(InputDriverPtr drv,
@@ -186,7 +179,7 @@ static void RandomUnInit(InputDriverPtr drv,
     RandomDevicePtr     pRandom = pInfo->private;
     if (pRandom->device)
     {
-        xfree(pRandom->device);
+        free(pRandom->device);
         pRandom->device = NULL;
         /* Common error - pInfo->private must be NULL or valid memoy before
          * passing into xf86DeleteInput */
@@ -206,19 +199,19 @@ _random_init_buttons(DeviceIntPtr device)
     int                 ret = Success;
     const int           num_buttons = 2;
 
-    map = xcalloc(num_buttons, sizeof(CARD8));
+    map = calloc(num_buttons, sizeof(CARD8));
 
     for (i = 0; i < num_buttons; i++)
         map[i] = i;
 
-    pRandom->labels = xalloc(sizeof(Atom));
+    pRandom->labels = calloc(1, sizeof(Atom));
 
     if (!InitButtonClassDeviceStruct(device, num_buttons, pRandom->labels, map)) {
             xf86Msg(X_ERROR, "%s: Failed to register buttons.\n", pInfo->name);
             ret = BadAlloc;
     }
 
-    xfree(map);
+    free(map);
     return ret;
 }
 
@@ -263,7 +256,7 @@ _random_init_axes(DeviceIntPtr device)
     Atom                * atoms;
 
     pRandom->num_vals = num_axes;
-    atoms = xalloc(pRandom->num_vals * sizeof(Atom));
+    atoms = calloc(pRandom->num_vals, sizeof(Atom));
 
     RandomInitAxesLabels(pRandom, pRandom->num_vals, atoms);
     if (!InitValuatorClassDeviceStruct(device,
@@ -275,15 +268,12 @@ _random_init_axes(DeviceIntPtr device)
                 0))
         return BadAlloc;
 
-    pInfo->dev->valuator->mode = Relative;
-    if (!InitAbsoluteClassDeviceStruct(device))
-            return BadAlloc;
-
     for (i = 0; i < pRandom->axes; i++) {
-            xf86InitValuatorAxisStruct(device, i, *pRandom->labels, -1, -1, 1, 1, 1);
+            xf86InitValuatorAxisStruct(device, i, *pRandom->labels,
+                                       -1, -1, 1, 1, 1, Absolute);
             xf86InitValuatorDefaults(device, i);
     }
-    xfree(atoms);
+    free(atoms);
     return Success;
 }
 
