@@ -24,6 +24,25 @@
 
 #define SYSCALL(call) while (((call) == -1) && (errno == EINTR))
 
+#define MAX_SLOTS 5
+struct Slot {
+    int slot_id;
+    int active;
+    int x;
+    int y;
+    int pressure;
+    unsigned int start_seconds;
+    unsigned int start_nanoseconds;
+    int startx;
+    int starty;
+    int dx;
+    int dy;
+};
+struct State {
+    struct Slot slots[MAX_SLOTS];
+    int current_slot_id;
+};
+
 typedef struct _RandomDeviceRec
 {
     char *device;
@@ -31,5 +50,7 @@ typedef struct _RandomDeviceRec
     Atom* labels;
     int num_vals;
     int axes;
+    struct libevdev* evdev;
+    struct State state;
 } RandomDeviceRec, *RandomDevicePtr ;
 

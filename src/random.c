@@ -38,7 +38,7 @@
 #include <exevents.h>
 #include <xorgVersion.h>
 #include <xkbsrv.h>
-
+#include <libevdev-1.0/libevdev/libevdev.h>
 
 #ifdef HAVE_PROPERTIES
 #include <xserver-properties.h>
@@ -74,6 +74,14 @@ static void RandomReadInput(InputInfoPtr pInfo);
 static int RandomControl(DeviceIntPtr    device,int what);
 static int _random_init_buttons(DeviceIntPtr device);
 static int _random_init_axes(DeviceIntPtr device);
+
+const char *type_and_code_name(int type, int code);
+unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int nanoseconds);
+void clear_state(struct State *state);
+void activate_current_slot(struct State *state, unsigned int seconds, unsigned int nanoseconds);
+void set_startxy_if_not_set(struct State *state, int slot_id);
+void calculate_dx_dy(struct State *state, int slot_id);
+void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int nanoseconds, int type, int code, int value);
 
 /* random_driver_name[] fixes a gcc warning:
  * "initialization discards 'const' qualifier from pointer target type" */
@@ -131,6 +139,7 @@ static int RandomPreInit(InputDriverPtr  drv,
                          int             flags)
 {
     RandomDevicePtr    pRandom;
+    int res;
 
 
     pRandom = calloc(1, sizeof(RandomDeviceRec));
@@ -148,7 +157,7 @@ static int RandomPreInit(InputDriverPtr  drv,
     /* process driver specific options */
     pRandom->device = xf86SetStrOption(pInfo->options,
                                        "Device",
-                                       "/dev/random");
+                                       "/dev/input/event8");
 
     xf86Msg(X_INFO, "%s: Using device %s.\n", pInfo->name, pRandom->device);
 
@@ -166,6 +175,16 @@ static int RandomPreInit(InputDriverPtr  drv,
         xf86DeleteInput(pInfo, 0);
         return BadAccess;
     }
+
+    pRandom->evdev = libevdev_new();
+    res = libevdev_set_fd(pRandom->evdev, pInfo->fd);
+    if (res != 0) {
+        xf86Msg(X_ERROR, "Cannot associate fd %i with libevdev\n", pInfo->fd);
+        libevdev_free(pRandom->evdev);
+        return BadAccess;
+    }
+    clear_state(&pRandom->state);
+
     /* do more funky stuff */
     close(pInfo->fd);
     pInfo->fd = -1;
@@ -263,7 +282,7 @@ _random_init_axes(DeviceIntPtr device)
                 num_axes,
 #if GET_ABI_MAJOR(ABI_XINPUT_VERSION) >= 7
                 atoms,
-#endif	
+#endif
                 GetMotionHistorySize(),
                 0))
         return BadAlloc;
@@ -323,19 +342,243 @@ static int RandomControl(DeviceIntPtr    device,
     return Success;
 }
 
+const char *type_and_code_name(int type, int code) {
+    switch (type) {
+        case EV_SYN:
+        return "EV_SYN";
+        break;
+        case EV_KEY:
+        switch (code) {
+            case BTN_LEFT:
+            return "EV_KEY BTN_LEFT";
+            break;
+            case BTN_TOOL_FINGER:
+            return "EV_KEY BTN_TOOL_FINGER";
+            break;
+            case BTN_TOOL_QUINTTAP:
+            return "EV_KEY BTN_TOOL_QUINTTAP";
+            break;
+            case BTN_TOUCH:
+            return "EV_KEY BTN_TOUCH";
+            break;
+            case BTN_TOOL_DOUBLETAP:
+            return "EV_KEY BTN_TOOL_DOUBLETAP";
+            break;
+            case BTN_TOOL_TRIPLETAP:
+            return "EV_KEY BTN_TOOL_TRIPLETAP";
+            break;
+            case BTN_TOOL_QUADTAP:
+            return "EV_KEY BTN_TOOL_QUADTAP";
+            break;
+        }
+        break;
+        case EV_ABS:
+        switch (code) {
+            case ABS_X:
+            return "EV_ABS ABS_X";
+            break;
+            case ABS_Y:
+            return "EV_ABS ABS_Y";
+            break;
+            case ABS_PRESSURE:
+            return "EV_ABS ABS_PRESSURE";
+            break;
+            case ABS_TOOL_WIDTH:
+            return "EV_ABS ABS_TOOL_WIDTH";
+            break;
+            case ABS_MT_SLOT:
+            return "EV_ABS ABS_MT_SLOT";
+            break;
+            case ABS_MT_TOUCH_MAJOR:
+            return "EV_ABS ABS_MT_TOUCH_MAJOR";
+            break;
+            case ABS_MT_TOUCH_MINOR:
+            return "EV_ABS ABS_MT_TOUCH_MINOR";
+            break;
+            case ABS_MT_WIDTH_MAJOR:
+            return "EV_ABS ABS_MT_WIDTH_MAJOR";
+            break;
+            case ABS_MT_WIDTH_MINOR:
+            return "EV_ABS ABS_MT_WIDTH_MINOR";
+            break;
+            case ABS_MT_ORIENTATION:
+            return "EV_ABS ABS_MT_ORIENTATION";
+            break;
+            case ABS_MT_POSITION_X:
+            return "EV_ABS ABS_MT_POSITION_X";
+            break;
+            case ABS_MT_POSITION_Y:
+            return "EV_ABS ABS_MT_POSITION_Y";
+            break;
+            case ABS_MT_TRACKING_ID:
+            return "EV_ABS ABS_MT_TRACKING_ID";
+            break;
+        }
+        break;
+    }
+    return "undefined";
+}
+unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int nanoseconds) {
+    if (!slot.active) {
+        return 0;
+    }
+    return (seconds - slot.start_seconds) * 1000 + (((int) nanoseconds) - ((int) slot.start_nanoseconds)) / 1000;
+}
+void clear_state(struct State *state) {
+    int i;
+    state->current_slot_id = 0;
+    for (i = 0; i < MAX_SLOTS; ++i) {
+        state->slots[i].slot_id = i;
+        state->slots[i].active = 0;
+        state->slots[i].x = 0;
+        state->slots[i].y = 0;
+        state->slots[i].pressure = 0;
+        state->slots[i].start_seconds = 0;
+        state->slots[i].start_nanoseconds = 0;
+        state->slots[i].startx = MAXINT;
+        state->slots[i].starty = MAXINT;
+        state->slots[i].dx = 0;
+        state->slots[i].dy = 0;
+    }
+}
+void activate_current_slot(struct State *state, unsigned int seconds, unsigned int nanoseconds) {
+    state->slots[state->current_slot_id].active = 1;
+    if (state->slots[state->current_slot_id].start_seconds == 0) {
+        state->slots[state->current_slot_id].start_seconds = seconds;
+        state->slots[state->current_slot_id].start_nanoseconds = nanoseconds;
+    }
+}
+void set_startxy_if_not_set(struct State *state, int slot_id) {
+    if (!state->slots[slot_id].active) {
+        return;
+    }
+    if (state->slots[slot_id].startx == MAXINT) {
+        state->slots[slot_id].startx = state->slots[slot_id].x;
+        state->slots[slot_id].starty = state->slots[slot_id].y;
+    }
+}
+void calculate_dx_dy(struct State *state, int slot_id) {
+    if (!state->slots[slot_id].active) {
+        return;
+    }
+    state->slots[slot_id].dx = (state->slots[slot_id].x - state->slots[slot_id].startx) / 10;
+    state->slots[slot_id].dy = (state->slots[slot_id].y - state->slots[slot_id].starty) / 10;
+    if (state->slots[slot_id].dx != 0) {
+        state->slots[slot_id].startx = state->slots[slot_id].x;
+    }
+    if (state->slots[slot_id].dy != 0) {
+        state->slots[slot_id].starty = state->slots[slot_id].y;
+    }
+}
+void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int nanoseconds, int type, int code, int value) {
+    switch (type) {
+        case EV_SYN:
+        xf86Msg(X_INFO, "slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
+            state->slots[0].active ? "*" : "-", state->slots[0].x, state->slots[0].y, elapsed_millis(state->slots[0], seconds, nanoseconds),
+            state->slots[1].active ? "*" : "-", state->slots[1].x, state->slots[1].y, elapsed_millis(state->slots[1], seconds, nanoseconds),
+            state->slots[2].active ? "*" : "-", state->slots[2].x, state->slots[2].y, elapsed_millis(state->slots[2], seconds, nanoseconds),
+            state->slots[3].active ? "*" : "-", state->slots[3].x, state->slots[3].y, elapsed_millis(state->slots[3], seconds, nanoseconds),
+            state->slots[4].active ? "*" : "-", state->slots[4].x, state->slots[4].y, elapsed_millis(state->slots[4], seconds, nanoseconds)
+            );
+        if (state->slots[0].active) {
+            set_startxy_if_not_set(state, state->current_slot_id);
+            calculate_dx_dy(state, state->current_slot_id);
+            xf86PostMotionEvent(pInfo->dev, 0, 0, 2, state->slots[0].dx, state->slots[0].dy);
+        }
+
+        break;
+        case EV_KEY:
+        switch (code) {
+            case BTN_LEFT:
+            if (value == 1) {
+                xf86PostButtonEvent(pInfo->dev, FALSE, 1, TRUE, 0, 0);
+            } else {
+                xf86PostButtonEvent(pInfo->dev, FALSE, 1, FALSE, 0, 0);
+            }
+            break;
+            case BTN_TOOL_FINGER:
+            break;
+            case BTN_TOOL_QUINTTAP:
+            break;
+            case BTN_TOUCH:
+            break;
+            case BTN_TOOL_DOUBLETAP:
+            break;
+            case BTN_TOOL_TRIPLETAP:
+            break;
+            case BTN_TOOL_QUADTAP:
+            break;
+        }
+        break;
+        case EV_ABS:
+        switch (code) {
+            case ABS_X:
+            break;
+            case ABS_Y:
+            break;
+            case ABS_PRESSURE:
+            state->slots[state->current_slot_id].pressure = value;
+            break;
+            case ABS_TOOL_WIDTH:
+            break;
+            case ABS_MT_SLOT:
+            set_startxy_if_not_set(state, state->current_slot_id);
+            state->current_slot_id = value;
+            activate_current_slot(state, seconds, nanoseconds);
+            break;
+            case ABS_MT_TOUCH_MAJOR:
+            break;
+            case ABS_MT_TOUCH_MINOR:
+            break;
+            case ABS_MT_WIDTH_MAJOR:
+            break;
+            case ABS_MT_WIDTH_MINOR:
+            break;
+            case ABS_MT_ORIENTATION:
+            break;
+            case ABS_MT_POSITION_X:
+            state->slots[state->current_slot_id].x = value;
+            break;
+            case ABS_MT_POSITION_Y:
+            state->slots[state->current_slot_id].y = value;
+            break;
+            case ABS_MT_TRACKING_ID:
+            if (value < 0) {
+                state->slots[state->current_slot_id].active = 0;
+                state->slots[state->current_slot_id].start_seconds = 0;
+                state->slots[state->current_slot_id].start_nanoseconds = 0;
+                state->slots[state->current_slot_id].startx = MAXINT;
+                state->slots[state->current_slot_id].starty = MAXINT;
+            } else {
+                activate_current_slot(state, seconds, nanoseconds);
+            }
+            break;
+        }
+        break;
+    }
+    if (type != EV_SYN) {
+        xf86Msg(X_INFO, "data: %u %8u %6i %s\n", seconds, nanoseconds, value, type_and_code_name(type, code));
+    }
+}
+
 static void RandomReadInput(InputInfoPtr pInfo)
 {
-    char data;
+    RandomDevicePtr pRandom = pInfo->private;
+    struct input_event ev;
+    int res;
 
-    while(xf86WaitForInput(pInfo->fd, 0) > 0)
-    {
-        read(pInfo->fd, &data, 1);
-
-        xf86PostMotionEvent(pInfo->dev,
-                            0, /* is_absolute */
-                            0, /* first_valuator */
-                            1, /* num_valuators */
-                            data);
+    while (1) {
+        res = libevdev_next_event(pRandom->evdev, LIBEVDEV_READ_FLAG_NORMAL, &ev);
+        if (res < 0) {
+            if (res == -EAGAIN) {
+                break;
+            } else {
+                xf86Msg(X_ERROR, "Cannot read next event: %i\n", res);
+                break;
+            }
+        } else {
+            process_event(pInfo, &pRandom->state, ev.time.tv_sec, ev.time.tv_usec, ev.type, ev.code, ev.value);
+        }
     }
 }
 
