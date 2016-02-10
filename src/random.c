@@ -81,6 +81,8 @@ unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned 
 void clear_state(struct State *state);
 void clear_slot(struct Slot *slot);
 void activate_current_slot(struct State *state, unsigned int seconds, unsigned int useconds);
+int get_active_slot_id(struct Slot slots[]);
+int is_tap_click(struct Slot *slot);
 void set_start_fields_if_not_set(struct Slot *slot, unsigned int seconds, unsigned int useconds);
 void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, unsigned int seconds, unsigned int useconds);
 void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int useconds, int type, int code, int value);
@@ -435,6 +437,8 @@ unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned 
 void clear_state(struct State *state) {
     int i;
     state->current_slot_id = 0;
+    state->active_slots = 0;
+    state->prev_active_slots = 0;
     for (i = 0; i < MAX_SLOTS; ++i) {
         clear_slot(&state->slots[i]);
         clear_slot(&state->prev_slots[i]);
@@ -462,6 +466,8 @@ void clear_slot(struct Slot *slot) {
     slot->ddy = 0.0;
     slot->dx = 0;
     slot->dy = 0;
+    slot->total_dx = 0;
+    slot->total_dy = 0;
 }
 void activate_current_slot(struct State *state, unsigned int seconds, unsigned int useconds) {
     state->slots[state->current_slot_id].active = 1;
@@ -469,6 +475,31 @@ void activate_current_slot(struct State *state, unsigned int seconds, unsigned i
         state->slots[state->current_slot_id].start_seconds = seconds;
         state->slots[state->current_slot_id].start_useconds = useconds;
     }
+}
+int get_active_slot_id(struct Slot slots[]) {
+    int i;
+    for (i = 0; i < MAX_SLOTS; ++i) {
+        if (slots[i].active) {
+            return i;
+        }
+    }
+    xf86Msg(X_ERROR, "No active slot!\n");
+    return -1;
+}
+int is_tap_click(struct Slot *slot) {
+    if (!slot->active) {
+        // xf86Msg(X_INFO, "is_tap_click: slot is not active\n");
+        return 0;
+    }
+    if (slot->elapsed_useconds > 100000) {
+        // xf86Msg(X_INFO, "is_tap_click: elapsed_useconds is too much: %i\n", slot->elapsed_useconds);
+        return 0;
+    }
+    if (slot->total_dx > 0 || slot->total_dy > 0) {
+        // xf86Msg(X_INFO, "is_tap_click: movement is too much, dx: %i, dy: %i\n", slot->total_dx, slot->total_dy);
+        return 0;
+    }
+    return 1;
 }
 void set_start_fields_if_not_set(struct Slot *slot, unsigned int seconds, unsigned int useconds) {
     if (!slot->active) {
@@ -503,21 +534,23 @@ void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, unsigned int sec
     }
     if (slot->x != MAXINT && prev_slot->x != MAXINT) {
         slot->ddx += (slot->x - prev_slot->x) / speed;
-        if (abs(slot->pressure - prev_slot->pressure) > 20) { // sudden change in pressure, the user releasing the touchpad
+        if (abs(slot->pressure - prev_slot->pressure) > 20 || slot->elapsed_useconds < 15000) { // sudden change in pressure, the user releasing the touchpad
             slot->ddx = 0.0;
         }
         slot->dx = (int) slot->ddx;
         if (slot->dx != 0) {
+            slot->total_dx += abs(slot->dx);
             slot->ddx -= slot->dx;
         }
     }
     if (slot->y != MAXINT && prev_slot->y != MAXINT) {
         slot->ddy += (slot->y - prev_slot->y) / speed;
-        if (abs(slot->pressure - prev_slot->pressure) > 20) { // sudden change in pressure, the user releasing the touchpad
+        if (abs(slot->pressure - prev_slot->pressure) > 20 || slot->elapsed_useconds < 15000) { // sudden change in pressure, the user releasing the touchpad
             slot->ddy = 0.0;
         }
         slot->dy = (int) slot->ddy;
         if (slot->dy != 0) {
+            slot->total_dy += abs(slot->dy);
             slot->ddy -= slot->dy;
         }
     }
@@ -526,6 +559,8 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
     double touch_mul, width_mul;
     double prev_touch_mul, prev_width_mul;
     int i;
+    struct Slot *slot;
+    struct Slot *prev_slot;
 
     switch (type) {
         case EV_SYN:
@@ -566,14 +601,37 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
             state->slots[0].touch_major, state->slots[0].touch_minor, state->slots[0].touch_major * state->slots[0].touch_minor, 100.0 * ((state->slots[0].touch_major * state->slots[0].touch_minor) / prev_touch_mul),
             state->slots[0].width_major, state->slots[0].width_minor, state->slots[0].width_major * state->slots[0].width_minor, 100.0 * ((state->slots[0].width_major * state->slots[0].width_minor) / prev_width_mul),
             state->slots[0].orientation);
-        if (state->active_slots == 1 && state->slots[0].active) {
-            set_start_fields_if_not_set(&state->slots[state->current_slot_id], seconds, useconds);
-            calculate_dx_dy(&state->slots[state->current_slot_id], &state->prev_slots[state->current_slot_id], seconds, useconds);
-            if (state->slots[0].dx != 0 || state->slots[0].dy != 0) {
-                xf86PostMotionEvent(pInfo->dev, 0, 0, 2, state->slots[0].dx, state->slots[0].dy);
+        if (state->active_slots == 1) {
+            i = get_active_slot_id(state->slots);
+            slot = &state->slots[i];
+            prev_slot = &state->prev_slots[i];
+            set_start_fields_if_not_set(slot, seconds, useconds);
+            calculate_dx_dy(slot, prev_slot, seconds, useconds);
+            if (slot->dx != 0 || slot->dy != 0) {
+                xf86PostMotionEvent(pInfo->dev, 0, 0, 2, slot->dx, slot->dy);
+            }
+        } else if (state->active_slots == 0 && state->prev_active_slots == 1) {
+            i = get_active_slot_id(state->prev_slots);
+            if (i >= 0) {
+                prev_slot = &state->prev_slots[i];
+                if (is_tap_click(prev_slot)) {
+                    xf86PostButtonEvent(pInfo->dev, FALSE, 1, TRUE, 0, 0);
+                    xf86PostButtonEvent(pInfo->dev, FALSE, 1, FALSE, 0, 0);
+                }
+            } else {
+                xf86Msg(X_ERROR, "No active prev_slot! slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
+                    state->prev_slots[0].active ? "*" : "-", state->prev_slots[0].x, state->prev_slots[0].y, state->prev_slots[0].elapsed_useconds/1000,
+                    state->prev_slots[1].active ? "*" : "-", state->prev_slots[1].x, state->prev_slots[1].y, state->prev_slots[1].elapsed_useconds/1000,
+                    state->prev_slots[2].active ? "*" : "-", state->prev_slots[2].x, state->prev_slots[2].y, state->prev_slots[2].elapsed_useconds/1000,
+                    state->prev_slots[3].active ? "*" : "-", state->prev_slots[3].x, state->prev_slots[3].y, state->prev_slots[3].elapsed_useconds/1000,
+                    state->prev_slots[4].active ? "*" : "-", state->prev_slots[4].x, state->prev_slots[4].y, state->prev_slots[4].elapsed_useconds/1000
+                    );
             }
         }
-        state->prev_slots[0] = state->slots[0];
+        state->prev_active_slots = state->active_slots;
+        for (i = 0; i < MAX_SLOTS; ++i) {
+            state->prev_slots[i] = state->slots[i];
+        }
         break;
         case EV_KEY:
         switch (code) {
@@ -638,7 +696,6 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
             case ABS_MT_TRACKING_ID:
             if (value < 0) {
                 clear_slot(&state->slots[state->current_slot_id]);
-                clear_slot(&state->prev_slots[state->current_slot_id]);
                 state->active_slots--;
             } else {
                 state->active_slots++;

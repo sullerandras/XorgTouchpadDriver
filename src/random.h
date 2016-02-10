@@ -48,12 +48,15 @@ struct Slot {
     double ddy;
     int dx;
     int dy;
+    int total_dx; // total horizontal movement since the slot is active
+    int total_dy; // total vertical movement since the slot is active
 };
 struct State {
     struct Slot slots[MAX_SLOTS];
     struct Slot prev_slots[MAX_SLOTS];
     int current_slot_id;
     int active_slots;
+    int prev_active_slots;
 };
 
 typedef struct _RandomDeviceRec
