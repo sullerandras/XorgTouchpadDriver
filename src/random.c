@@ -76,12 +76,14 @@ static int _random_init_buttons(DeviceIntPtr device);
 static int _random_init_axes(DeviceIntPtr device);
 
 const char *type_and_code_name(int type, int code);
-unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int nanoseconds);
+unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int useconds);
+unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned int useconds);
 void clear_state(struct State *state);
-void activate_current_slot(struct State *state, unsigned int seconds, unsigned int nanoseconds);
-void set_startxy_if_not_set(struct State *state, int slot_id);
-void calculate_dx_dy(struct State *state, int slot_id);
-void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int nanoseconds, int type, int code, int value);
+void clear_slot(struct Slot *slot);
+void activate_current_slot(struct State *state, unsigned int seconds, unsigned int useconds);
+void set_start_fields_if_not_set(struct Slot *slot, unsigned int seconds, unsigned int useconds);
+void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, unsigned int seconds, unsigned int useconds);
+void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int useconds, int type, int code, int value);
 
 /* random_driver_name[] fixes a gcc warning:
  * "initialization discards 'const' qualifier from pointer target type" */
@@ -418,74 +420,160 @@ const char *type_and_code_name(int type, int code) {
     }
     return "undefined";
 }
-unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int nanoseconds) {
+unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int useconds) {
     if (!slot.active) {
         return 0;
     }
-    return (seconds - slot.start_seconds) * 1000 + (((int) nanoseconds) - ((int) slot.start_nanoseconds)) / 1000;
+    return (seconds - slot.start_seconds) * 1000 + (((int) useconds) - ((int) slot.start_useconds)) / 1000;
+}
+unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned int useconds) {
+    if (!slot->active) {
+        return 0;
+    }
+    return (seconds - slot->start_seconds) * 1000000 + (((int) useconds) - ((int) slot->start_useconds));
 }
 void clear_state(struct State *state) {
     int i;
     state->current_slot_id = 0;
     for (i = 0; i < MAX_SLOTS; ++i) {
-        state->slots[i].slot_id = i;
-        state->slots[i].active = 0;
-        state->slots[i].x = 0;
-        state->slots[i].y = 0;
-        state->slots[i].pressure = 0;
-        state->slots[i].start_seconds = 0;
-        state->slots[i].start_nanoseconds = 0;
-        state->slots[i].startx = MAXINT;
-        state->slots[i].starty = MAXINT;
-        state->slots[i].dx = 0;
-        state->slots[i].dy = 0;
+        clear_slot(&state->slots[i]);
+        clear_slot(&state->prev_slots[i]);
     }
 }
-void activate_current_slot(struct State *state, unsigned int seconds, unsigned int nanoseconds) {
+void clear_slot(struct Slot *slot) {
+    slot->active = 0;
+    slot->x = MAXINT;
+    slot->y = MAXINT;
+    slot->pressure = 0;
+    slot->touch_major = 0;
+    slot->touch_minor = 0;
+    slot->width_major = 0;
+    slot->width_minor = 0;
+    slot->orientation = 0;
+
+    slot->start_seconds = 0;
+    slot->start_useconds = 0;
+    slot->elapsed_useconds = 0;
+
+    slot->startx = MAXINT;
+    slot->starty = MAXINT;
+
+    slot->ddx = 0.0;
+    slot->ddy = 0.0;
+    slot->dx = 0;
+    slot->dy = 0;
+}
+void activate_current_slot(struct State *state, unsigned int seconds, unsigned int useconds) {
     state->slots[state->current_slot_id].active = 1;
     if (state->slots[state->current_slot_id].start_seconds == 0) {
         state->slots[state->current_slot_id].start_seconds = seconds;
-        state->slots[state->current_slot_id].start_nanoseconds = nanoseconds;
+        state->slots[state->current_slot_id].start_useconds = useconds;
     }
 }
-void set_startxy_if_not_set(struct State *state, int slot_id) {
-    if (!state->slots[slot_id].active) {
+void set_start_fields_if_not_set(struct Slot *slot, unsigned int seconds, unsigned int useconds) {
+    if (!slot->active) {
         return;
     }
-    if (state->slots[slot_id].startx == MAXINT) {
-        state->slots[slot_id].startx = state->slots[slot_id].x;
-        state->slots[slot_id].starty = state->slots[slot_id].y;
+    if (slot->startx == MAXINT) {
+        slot->startx = slot->x;
+    }
+    if (slot->starty == MAXINT) {
+        slot->starty = slot->y;
     }
 }
-void calculate_dx_dy(struct State *state, int slot_id) {
-    if (!state->slots[slot_id].active) {
+void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, unsigned int seconds, unsigned int useconds) {
+    double speed, delta;
+
+    if (!slot->active) {
         return;
     }
-    state->slots[slot_id].dx = (state->slots[slot_id].x - state->slots[slot_id].startx) / 10;
-    state->slots[slot_id].dy = (state->slots[slot_id].y - state->slots[slot_id].starty) / 10;
-    if (state->slots[slot_id].dx != 0) {
-        state->slots[slot_id].startx = state->slots[slot_id].x;
+    if (slot->pressure == 0) {
+        return;
     }
-    if (state->slots[slot_id].dy != 0) {
-        state->slots[slot_id].starty = state->slots[slot_id].y;
+    delta = abs(slot->x - prev_slot->x) + abs(slot->y - prev_slot->y);
+    if (delta == 0) {
+        speed = 25.0;
+    } else {
+        speed = pow((slot->elapsed_useconds - prev_slot->elapsed_useconds) / delta, 0.7) * 0.5;
+        if (speed > 25.0) {
+            speed = 25.0;
+        } else if (speed < 5.0) {
+            speed = 5.0;
+        }
+    }
+    if (slot->x != MAXINT && prev_slot->x != MAXINT) {
+        slot->ddx += (slot->x - prev_slot->x) / speed;
+        if (abs(slot->pressure - prev_slot->pressure) > 20) { // sudden change in pressure, the user releasing the touchpad
+            slot->ddx = 0.0;
+        }
+        slot->dx = (int) slot->ddx;
+        if (slot->dx != 0) {
+            slot->ddx -= slot->dx;
+        }
+    }
+    if (slot->y != MAXINT && prev_slot->y != MAXINT) {
+        slot->ddy += (slot->y - prev_slot->y) / speed;
+        if (abs(slot->pressure - prev_slot->pressure) > 20) { // sudden change in pressure, the user releasing the touchpad
+            slot->ddy = 0.0;
+        }
+        slot->dy = (int) slot->ddy;
+        if (slot->dy != 0) {
+            slot->ddy -= slot->dy;
+        }
     }
 }
-void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int nanoseconds, int type, int code, int value) {
+void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int useconds, int type, int code, int value) {
+    double touch_mul, width_mul;
+    double prev_touch_mul, prev_width_mul;
+    int i;
+
     switch (type) {
         case EV_SYN:
-        xf86Msg(X_INFO, "slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
-            state->slots[0].active ? "*" : "-", state->slots[0].x, state->slots[0].y, elapsed_millis(state->slots[0], seconds, nanoseconds),
-            state->slots[1].active ? "*" : "-", state->slots[1].x, state->slots[1].y, elapsed_millis(state->slots[1], seconds, nanoseconds),
-            state->slots[2].active ? "*" : "-", state->slots[2].x, state->slots[2].y, elapsed_millis(state->slots[2], seconds, nanoseconds),
-            state->slots[3].active ? "*" : "-", state->slots[3].x, state->slots[3].y, elapsed_millis(state->slots[3], seconds, nanoseconds),
-            state->slots[4].active ? "*" : "-", state->slots[4].x, state->slots[4].y, elapsed_millis(state->slots[4], seconds, nanoseconds)
-            );
-        if (state->slots[0].active) {
-            set_startxy_if_not_set(state, state->current_slot_id);
-            calculate_dx_dy(state, state->current_slot_id);
-            xf86PostMotionEvent(pInfo->dev, 0, 0, 2, state->slots[0].dx, state->slots[0].dy);
+        // xf86Msg(X_INFO, "slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
+        //     state->slots[0].active ? "*" : "-", state->slots[0].x, state->slots[0].y, elapsed_millis(state->slots[0], seconds, useconds),
+        //     state->slots[1].active ? "*" : "-", state->slots[1].x, state->slots[1].y, elapsed_millis(state->slots[1], seconds, useconds),
+        //     state->slots[2].active ? "*" : "-", state->slots[2].x, state->slots[2].y, elapsed_millis(state->slots[2], seconds, useconds),
+        //     state->slots[3].active ? "*" : "-", state->slots[3].x, state->slots[3].y, elapsed_millis(state->slots[3], seconds, useconds),
+        //     state->slots[4].active ? "*" : "-", state->slots[4].x, state->slots[4].y, elapsed_millis(state->slots[4], seconds, useconds)
+        //     );
+        for (i = 0; i < MAX_SLOTS; ++i) {
+            state->slots[i].elapsed_useconds = elapsed_useconds(&state->slots[i], seconds, useconds);
         }
 
+        touch_mul      = state->slots[0].touch_major * state->slots[0].touch_minor;
+        width_mul      = state->slots[0].width_major * state->slots[0].width_minor;
+        prev_touch_mul = state->prev_slots[0].touch_major * state->prev_slots[0].touch_minor;
+        prev_width_mul = state->prev_slots[0].width_major * state->prev_slots[0].width_minor;
+        if (touch_mul == 0) {
+            touch_mul = 1;
+        }
+        if (width_mul == 0) {
+            width_mul = 1;
+        }
+        if (prev_touch_mul == 0) {
+            prev_touch_mul = touch_mul;
+        }
+        if (prev_width_mul == 0) {
+            prev_width_mul = width_mul;
+        }
+        xf86Msg(X_INFO, "active: %i, slot 0: (%s %i:%i (%3i:%3i) %umsec, pressure: %i, touch: %i/%i (%i d: %.2f%%), width: %i/%i (%i d: %.2f%%), o: %i)\n",
+            state->active_slots,
+            state->slots[0].active ? "*" : "-",
+            state->slots[0].x, state->slots[0].y,
+            state->slots[0].dx, state->slots[0].dy,
+            state->slots[0].elapsed_useconds / 1000,
+            state->slots[0].pressure,
+            state->slots[0].touch_major, state->slots[0].touch_minor, state->slots[0].touch_major * state->slots[0].touch_minor, 100.0 * ((state->slots[0].touch_major * state->slots[0].touch_minor) / prev_touch_mul),
+            state->slots[0].width_major, state->slots[0].width_minor, state->slots[0].width_major * state->slots[0].width_minor, 100.0 * ((state->slots[0].width_major * state->slots[0].width_minor) / prev_width_mul),
+            state->slots[0].orientation);
+        if (state->active_slots == 1 && state->slots[0].active) {
+            set_start_fields_if_not_set(&state->slots[state->current_slot_id], seconds, useconds);
+            calculate_dx_dy(&state->slots[state->current_slot_id], &state->prev_slots[state->current_slot_id], seconds, useconds);
+            if (state->slots[0].dx != 0 || state->slots[0].dy != 0) {
+                xf86PostMotionEvent(pInfo->dev, 0, 0, 2, state->slots[0].dx, state->slots[0].dy);
+            }
+        }
+        state->prev_slots[0] = state->slots[0];
         break;
         case EV_KEY:
         switch (code) {
@@ -522,19 +610,24 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
             case ABS_TOOL_WIDTH:
             break;
             case ABS_MT_SLOT:
-            set_startxy_if_not_set(state, state->current_slot_id);
+            set_start_fields_if_not_set(&state->slots[state->current_slot_id], seconds, useconds);
             state->current_slot_id = value;
-            activate_current_slot(state, seconds, nanoseconds);
+            activate_current_slot(state, seconds, useconds);
             break;
             case ABS_MT_TOUCH_MAJOR:
+            state->slots[state->current_slot_id].touch_major = value;
             break;
             case ABS_MT_TOUCH_MINOR:
+            state->slots[state->current_slot_id].touch_minor = value;
             break;
             case ABS_MT_WIDTH_MAJOR:
+            state->slots[state->current_slot_id].width_major = value;
             break;
             case ABS_MT_WIDTH_MINOR:
+            state->slots[state->current_slot_id].width_minor = value;
             break;
             case ABS_MT_ORIENTATION:
+            state->slots[state->current_slot_id].orientation = value;
             break;
             case ABS_MT_POSITION_X:
             state->slots[state->current_slot_id].x = value;
@@ -544,20 +637,19 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
             break;
             case ABS_MT_TRACKING_ID:
             if (value < 0) {
-                state->slots[state->current_slot_id].active = 0;
-                state->slots[state->current_slot_id].start_seconds = 0;
-                state->slots[state->current_slot_id].start_nanoseconds = 0;
-                state->slots[state->current_slot_id].startx = MAXINT;
-                state->slots[state->current_slot_id].starty = MAXINT;
+                clear_slot(&state->slots[state->current_slot_id]);
+                clear_slot(&state->prev_slots[state->current_slot_id]);
+                state->active_slots--;
             } else {
-                activate_current_slot(state, seconds, nanoseconds);
+                state->active_slots++;
+                activate_current_slot(state, seconds, useconds);
             }
             break;
         }
         break;
     }
     if (type != EV_SYN) {
-        xf86Msg(X_INFO, "data: %u %8u %6i %s\n", seconds, nanoseconds, value, type_and_code_name(type, code));
+        xf86Msg(X_INFO, "data: %u %8u %6i %s\n", seconds, useconds, value, type_and_code_name(type, code));
     }
 }
 

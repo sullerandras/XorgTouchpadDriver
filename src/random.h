@@ -31,16 +31,29 @@ struct Slot {
     int x;
     int y;
     int pressure;
+    int touch_major;
+    int touch_minor;
+    int width_major;
+    int width_minor;
+    int orientation;
+
     unsigned int start_seconds;
-    unsigned int start_nanoseconds;
+    unsigned int start_useconds;
+    int elapsed_useconds;
+
     int startx;
     int starty;
+
+    double ddx;
+    double ddy;
     int dx;
     int dy;
 };
 struct State {
     struct Slot slots[MAX_SLOTS];
+    struct Slot prev_slots[MAX_SLOTS];
     int current_slot_id;
+    int active_slots;
 };
 
 typedef struct _RandomDeviceRec
