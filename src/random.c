@@ -76,7 +76,6 @@ static int _random_init_buttons(DeviceIntPtr device);
 static int _random_init_axes(DeviceIntPtr device);
 
 const char *type_and_code_name(int type, int code);
-unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int useconds);
 unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned int useconds);
 void clear_state(struct State *state);
 void clear_slot(struct Slot *slot);
@@ -421,12 +420,6 @@ const char *type_and_code_name(int type, int code) {
         break;
     }
     return "undefined";
-}
-unsigned int elapsed_millis(struct Slot slot, unsigned int seconds, unsigned int useconds) {
-    if (!slot.active) {
-        return 0;
-    }
-    return (seconds - slot.start_seconds) * 1000 + (((int) useconds) - ((int) slot.start_useconds)) / 1000;
 }
 unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned int useconds) {
     if (!slot->active) {
