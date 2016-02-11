@@ -24,6 +24,14 @@
 
 #define SYSCALL(call) while (((call) == -1) && (errno == EINTR))
 
+#define MOUSE_LEFT_BUTTON               1
+#define MOUSE_RIGHT_BUTTON              3
+#define MOUSE_MIDDLE_BUTTON             2
+#define MOUSE_VERTICAL_WHEEL_1_BUTTON   4
+#define MOUSE_VERTICAL_WHEEL_2_BUTTON   5
+#define MOUSE_HORIZONTAL_WHEEL_1_BUTTON 6
+#define MOUSE_HORIZONTAL_WHEEL_2_BUTTON 7
+
 #define MAX_SLOTS 5
 struct Slot {
     int slot_id;

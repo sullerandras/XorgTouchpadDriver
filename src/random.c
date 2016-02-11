@@ -629,10 +629,10 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
         case EV_KEY:
         switch (code) {
             case BTN_LEFT:
-            if (value == 1) {
-                xf86PostButtonEvent(pInfo->dev, FALSE, 1, TRUE, 0, 0);
-            } else {
-                xf86PostButtonEvent(pInfo->dev, FALSE, 1, FALSE, 0, 0);
+            if (state->active_slots == 1) {
+                xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, value, 0, 0);
+            } else if (state->active_slots == 2) {
+                xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_RIGHT_BUTTON, value, 0, 0);
             }
             break;
             case BTN_TOOL_FINGER:
