@@ -38,6 +38,8 @@ enum TouchpadStates {
     TS_DEFAULT,
     TS_2_FINGER_SCROLL, // there are 2 active slots
     TS_2_FINGER_SCROLL_RELEASING, // previously there were 2 active slots but now only 1. Ignoring pointer movements for a short period to avoid accidental pointer movements after scrolling with 2 fingers
+    TS_3_FINGER_DRAG,
+    TS_3_FINGER_DRAG_RELEASING,
 };
 
 struct Slot {

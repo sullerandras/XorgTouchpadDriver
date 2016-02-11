@@ -83,12 +83,14 @@ void clear_slot(struct Slot *slot);
 void activate_current_slot(struct State *state, struct timeval *time);
 int get_active_slot_id(struct Slot slots[]);
 void get_2_active_slots(struct Slot slots[], struct Slot **slot1, struct Slot **slot2);
+void get_3_active_slots(struct Slot slots[], struct Slot **slot1, struct Slot **slot2, struct Slot **slot3);
 int is_tap_click(struct Slot *slot);
 void set_start_fields_if_not_set(struct Slot *slot, struct timeval *time);
 void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, struct timeval *time);
 void update_touchpad_state(struct State *state, enum TouchpadStates new_state, struct timeval *time);
 void debug_slots(struct State *state);
 void handle_2_finger_scroll(InputInfoPtr pInfo, struct State *state, struct Slot *slot1, struct Slot *slot2, struct Slot *prev_slot1, struct Slot *prev_slot2, struct timeval *time);
+void handle_3_finger_drag(InputInfoPtr pInfo, struct State *state, struct Slot *slot1, struct Slot *slot2, struct Slot *slot3, struct Slot *prev_slot1, struct Slot *prev_slot2, struct Slot *prev_slot3, struct timeval *time);
 void process_EV_SYN(InputInfoPtr pInfo, struct State *state, struct timeval *time);
 void save_current_values_to_prev(struct State *state);
 void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value);
@@ -513,6 +515,24 @@ void get_2_active_slots(struct Slot slots[], struct Slot **slot1, struct Slot **
         }
     }
 }
+void get_3_active_slots(struct Slot slots[], struct Slot **slot1, struct Slot **slot2, struct Slot **slot3) {
+    int i;
+    *slot1 = NULL;
+    *slot2 = NULL;
+    *slot3 = NULL;
+    for (i = 0; i < MAX_SLOTS; ++i) {
+        if (slots[i].active) {
+            if (*slot1 == NULL) {
+                *slot1 = &slots[i];
+            } else if (*slot2 == NULL) {
+                *slot2 = &slots[i];
+            } else {
+                *slot3 = &slots[i];
+                break;
+            }
+        }
+    }
+}
 int is_tap_click(struct Slot *slot) {
     if (!slot->active) {
         // xf86Msg(X_INFO, "is_tap_click: slot is not active\n");
@@ -543,9 +563,6 @@ void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, struct timeval *
     double speed, delta;
 
     if (!slot->active) {
-        return;
-    }
-    if (slot->pressure == 0) {
         return;
     }
     delta = abs(slot->x - prev_slot->x) + abs(slot->y - prev_slot->y);
@@ -589,8 +606,8 @@ void update_touchpad_state(struct State *state, enum TouchpadStates new_state, s
     }
 }
 void debug_slots(struct State *state) {
-    xf86Msg(X_INFO, "active: %i, slots: (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i)\n",
-        state->active_slots,
+    xf86Msg(X_INFO, "active: %i (%i), state: %i, slots: (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i)\n",
+        state->active_slots, state->prev_active_slots, state->touchpad_state,
         state->slots[0].active ? "*" : "-", state->slots[0].active ? state->slots[0].x : 0, state->slots[0].active ? state->slots[0].y : 0, state->slots[0].elapsed_useconds / 1000, state->slots[0].pressure,
         state->slots[1].active ? "*" : "-", state->slots[1].active ? state->slots[1].x : 0, state->slots[1].active ? state->slots[1].y : 0, state->slots[1].elapsed_useconds / 1000, state->slots[1].pressure,
         state->slots[2].active ? "*" : "-", state->slots[2].active ? state->slots[2].x : 0, state->slots[2].active ? state->slots[2].y : 0, state->slots[2].elapsed_useconds / 1000, state->slots[2].pressure,
@@ -671,11 +688,33 @@ void handle_2_finger_scroll(InputInfoPtr pInfo, struct State *state, struct Slot
         update_touchpad_state(state, TS_2_FINGER_SCROLL, time);
     }
 }
+void handle_3_finger_drag(InputInfoPtr pInfo, struct State *state, struct Slot *slot1, struct Slot *slot2, struct Slot *slot3, struct Slot *prev_slot1, struct Slot *prev_slot2, struct Slot *prev_slot3, struct timeval *time) {
+    int dx, dy;
+    set_start_fields_if_not_set(slot1, time);
+    set_start_fields_if_not_set(slot2, time);
+    set_start_fields_if_not_set(slot3, time);
+    calculate_dx_dy(slot1, prev_slot1, time);
+    calculate_dx_dy(slot2, prev_slot2, time);
+    calculate_dx_dy(slot3, prev_slot3, time);
+    dx = slot1->dx;
+    dy = slot1->dy;
+    xf86Msg(X_INFO, "handle_3_finger_drag dx: %i, dy: %i\n", dx, dy);
+    if (dx != 0 || dy != 0) {
+        if (state->touchpad_state != TS_3_FINGER_DRAG) {
+            update_touchpad_state(state, TS_3_FINGER_DRAG, time);
+            xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, TRUE, 0, 0);
+        }
+        xf86PostMotionEvent(pInfo->dev, 0, 0, 2, dx, dy);
+    }
+}
 void process_EV_SYN(InputInfoPtr pInfo, struct State *state, struct timeval *time) {
     int i;
-    struct Slot *slot, *slot1, *slot2;
-    struct Slot *prev_slot, *prev_slot1, *prev_slot2;
-    if (state->active_slots == 1) {
+    struct Slot *slot, *slot1, *slot2, *slot3;
+    struct Slot *prev_slot, *prev_slot1, *prev_slot2, *prev_slot3;
+    if (state->touchpad_state == TS_3_FINGER_DRAG && state->active_slots != 3) {
+        update_touchpad_state(state, TS_DEFAULT, time);
+        xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, FALSE, 0, 0);
+    } else if (state->active_slots == 1) {
         i = get_active_slot_id(state->slots);
         slot = &state->slots[i];
         prev_slot = &state->prev_slots[i];
@@ -721,6 +760,14 @@ void process_EV_SYN(InputInfoPtr pInfo, struct State *state, struct timeval *tim
             get_2_active_slots(state->prev_slots, &prev_slot1, &prev_slot2);
             if (prev_slot1 != NULL && prev_slot2 != NULL) {
                 handle_2_finger_scroll(pInfo, state, slot1, slot2, prev_slot1, prev_slot2, time);
+            }
+        }
+    } else if (state->active_slots == 3 && state->prev_active_slots == 3) {
+        get_3_active_slots(state->slots, &slot1, &slot2, &slot3);
+        if (slot1 != NULL && slot2 != NULL && slot3 != NULL) {
+            get_3_active_slots(state->prev_slots, &prev_slot1, &prev_slot2, &prev_slot3);
+            if (prev_slot1 != NULL && prev_slot2 != NULL && prev_slot3 != NULL) {
+                handle_3_finger_drag(pInfo, state, slot1, slot2, slot3, prev_slot1, prev_slot2, prev_slot3, time);
             }
         }
     }
