@@ -197,6 +197,9 @@ static int RandomPreInit(InputDriverPtr  drv,
     }
     clear_state(&pRandom->state);
 
+    // create a timer used for timeout during 3-finger-drag
+    pRandom->state.timer = TimerSet(NULL, 0, 0, NULL, NULL);
+
     /* do more funky stuff */
     close(pInfo->fd);
     pInfo->fd = -1;
@@ -212,6 +215,9 @@ static void RandomUnInit(InputDriverPtr drv,
     {
         free(pRandom->device);
         pRandom->device = NULL;
+    }
+    if (pRandom && pRandom->state.timer) {
+        free(pRandom->state.timer);
     }
     free(pInfo->private);
     /* Common error - pInfo->private must be NULL or valid memoy before
@@ -454,6 +460,7 @@ void clear_state(struct State *state) {
     state->touchpad_state = TS_DEFAULT;
     state->touchpad_state_updated_at.tv_sec = 0;
     state->touchpad_state_updated_at.tv_usec = 0;
+    state->timer = NULL;
     for (i = 0; i < MAX_SLOTS; ++i) {
         clear_slot(&state->slots[i]);
         clear_slot(&state->prev_slots[i]);
@@ -696,9 +703,8 @@ void handle_3_finger_drag(InputInfoPtr pInfo, struct State *state, struct Slot *
     calculate_dx_dy(slot1, prev_slot1, time);
     calculate_dx_dy(slot2, prev_slot2, time);
     calculate_dx_dy(slot3, prev_slot3, time);
-    dx = slot1->dx;
-    dy = slot1->dy;
-    xf86Msg(X_INFO, "handle_3_finger_drag dx: %i, dy: %i\n", dx, dy);
+    dx = round((slot1->dx + slot2->dx + slot3->dx) / 3.0);
+    dy = round((slot1->dy + slot2->dy + slot3->dy) / 3.0);
     if (dx != 0 || dy != 0) {
         if (state->touchpad_state != TS_3_FINGER_DRAG) {
             update_touchpad_state(state, TS_3_FINGER_DRAG, time);
@@ -707,13 +713,37 @@ void handle_3_finger_drag(InputInfoPtr pInfo, struct State *state, struct Slot *
         xf86PostMotionEvent(pInfo->dev, 0, 0, 2, dx, dy);
     }
 }
+static CARD32 timerFunc(OsTimerPtr timer, CARD32 now, pointer arg) {
+    InputInfoPtr pInfo;
+    RandomDevicePtr pRandom;
+    struct State *state;
+    struct timeval time;
+
+    pInfo = arg;
+    pRandom = pInfo->private;
+    state = &pRandom->state;
+    if (state->touchpad_state == TS_3_FINGER_DRAG_RELEASING) {
+        time.tv_sec = 0;
+        time.tv_usec = 0;
+        update_touchpad_state(state, TS_DEFAULT, &time);
+        xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, FALSE, 0, 0);
+    }
+    return 0;
+}
 void process_EV_SYN(InputInfoPtr pInfo, struct State *state, struct timeval *time) {
     int i;
     struct Slot *slot, *slot1, *slot2, *slot3;
     struct Slot *prev_slot, *prev_slot1, *prev_slot2, *prev_slot3;
     if (state->touchpad_state == TS_3_FINGER_DRAG && state->active_slots != 3) {
-        update_touchpad_state(state, TS_DEFAULT, time);
-        xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, FALSE, 0, 0);
+        update_touchpad_state(state, TS_3_FINGER_DRAG_RELEASING, time);
+        state->timer = TimerSet(state->timer, 0, 500, timerFunc, pInfo);
+    } else if (state->touchpad_state == TS_3_FINGER_DRAG_RELEASING) {
+        if (state->active_slots == 3) {
+            update_touchpad_state(state, TS_3_FINGER_DRAG, time);
+            TimerCancel(state->timer);
+        } else {
+            // keep waiting until timer kills the current state or the user reconnects the 3 fingers
+        }
     } else if (state->active_slots == 1) {
         i = get_active_slot_id(state->slots);
         slot = &state->slots[i];

@@ -75,6 +75,7 @@ struct State {
     int prev_active_slots;
     enum TouchpadStates touchpad_state;
     struct timeval touchpad_state_updated_at;
+    OsTimerPtr timer;
 };
 
 typedef struct _RandomDeviceRec
