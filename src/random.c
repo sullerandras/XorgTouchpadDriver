@@ -549,7 +549,7 @@ int is_tap_click(struct Slot *slot) {
         // xf86Msg(X_INFO, "is_tap_click: elapsed_useconds is too much: %i\n", slot->elapsed_useconds);
         return 0;
     }
-    if (slot->total_dx > 0 || slot->total_dy > 0) {
+    if (slot->total_dx > 2 || slot->total_dy > 2) {
         // xf86Msg(X_INFO, "is_tap_click: movement is too much, dx: %i, dy: %i\n", slot->total_dx, slot->total_dy);
         return 0;
     }
