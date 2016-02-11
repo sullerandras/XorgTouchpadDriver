@@ -76,15 +76,15 @@ static int _random_init_buttons(DeviceIntPtr device);
 static int _random_init_axes(DeviceIntPtr device);
 
 const char *type_and_code_name(int type, int code);
-unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned int useconds);
+unsigned int elapsed_useconds(struct Slot *slot, struct timeval *time);
 void clear_state(struct State *state);
 void clear_slot(struct Slot *slot);
-void activate_current_slot(struct State *state, unsigned int seconds, unsigned int useconds);
+void activate_current_slot(struct State *state, struct timeval *time);
 int get_active_slot_id(struct Slot slots[]);
 int is_tap_click(struct Slot *slot);
-void set_start_fields_if_not_set(struct Slot *slot, unsigned int seconds, unsigned int useconds);
-void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, unsigned int seconds, unsigned int useconds);
-void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int useconds, int type, int code, int value);
+void set_start_fields_if_not_set(struct Slot *slot, struct timeval *time);
+void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, struct timeval *time);
+void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value);
 
 /* random_driver_name[] fixes a gcc warning:
  * "initialization discards 'const' qualifier from pointer target type" */
@@ -421,11 +421,11 @@ const char *type_and_code_name(int type, int code) {
     }
     return "undefined";
 }
-unsigned int elapsed_useconds(struct Slot *slot, unsigned int seconds, unsigned int useconds) {
+unsigned int elapsed_useconds(struct Slot *slot, struct timeval *time) {
     if (!slot->active) {
         return 0;
     }
-    return (seconds - slot->start_seconds) * 1000000 + (((int) useconds) - ((int) slot->start_useconds));
+    return (time->tv_sec - slot->start_time.tv_sec) * 1000000 + (((int) time->tv_usec) - ((int) slot->start_time.tv_usec));
 }
 void clear_state(struct State *state) {
     int i;
@@ -448,8 +448,8 @@ void clear_slot(struct Slot *slot) {
     slot->width_minor = 0;
     slot->orientation = 0;
 
-    slot->start_seconds = 0;
-    slot->start_useconds = 0;
+    slot->start_time.tv_sec = 0;
+    slot->start_time.tv_usec = 0;
     slot->elapsed_useconds = 0;
 
     slot->startx = MAXINT;
@@ -462,11 +462,10 @@ void clear_slot(struct Slot *slot) {
     slot->total_dx = 0;
     slot->total_dy = 0;
 }
-void activate_current_slot(struct State *state, unsigned int seconds, unsigned int useconds) {
+void activate_current_slot(struct State *state, struct timeval *time) {
     state->slots[state->current_slot_id].active = 1;
-    if (state->slots[state->current_slot_id].start_seconds == 0) {
-        state->slots[state->current_slot_id].start_seconds = seconds;
-        state->slots[state->current_slot_id].start_useconds = useconds;
+    if (state->slots[state->current_slot_id].start_time.tv_sec == 0) {
+        state->slots[state->current_slot_id].start_time = *time;
     }
 }
 int get_active_slot_id(struct Slot slots[]) {
@@ -494,7 +493,7 @@ int is_tap_click(struct Slot *slot) {
     }
     return 1;
 }
-void set_start_fields_if_not_set(struct Slot *slot, unsigned int seconds, unsigned int useconds) {
+void set_start_fields_if_not_set(struct Slot *slot, struct timeval *time) {
     if (!slot->active) {
         return;
     }
@@ -505,7 +504,7 @@ void set_start_fields_if_not_set(struct Slot *slot, unsigned int seconds, unsign
         slot->starty = slot->y;
     }
 }
-void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, unsigned int seconds, unsigned int useconds) {
+void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, struct timeval *time) {
     double speed, delta;
 
     if (!slot->active) {
@@ -548,7 +547,7 @@ void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, unsigned int sec
         }
     }
 }
-void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds, unsigned int useconds, int type, int code, int value) {
+void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value) {
     double touch_mul, width_mul;
     double prev_touch_mul, prev_width_mul;
     int i;
@@ -565,7 +564,7 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
         //     state->slots[4].active ? "*" : "-", state->slots[4].x, state->slots[4].y, elapsed_millis(state->slots[4], seconds, useconds)
         //     );
         for (i = 0; i < MAX_SLOTS; ++i) {
-            state->slots[i].elapsed_useconds = elapsed_useconds(&state->slots[i], seconds, useconds);
+            state->slots[i].elapsed_useconds = elapsed_useconds(&state->slots[i], time);
         }
 
         touch_mul      = state->slots[0].touch_major * state->slots[0].touch_minor;
@@ -598,8 +597,8 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
             i = get_active_slot_id(state->slots);
             slot = &state->slots[i];
             prev_slot = &state->prev_slots[i];
-            set_start_fields_if_not_set(slot, seconds, useconds);
-            calculate_dx_dy(slot, prev_slot, seconds, useconds);
+            set_start_fields_if_not_set(slot, time);
+            calculate_dx_dy(slot, prev_slot, time);
             if (slot->dx != 0 || slot->dy != 0) {
                 xf86PostMotionEvent(pInfo->dev, 0, 0, 2, slot->dx, slot->dy);
             }
@@ -608,8 +607,8 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
             if (i >= 0) {
                 prev_slot = &state->prev_slots[i];
                 if (is_tap_click(prev_slot)) {
-                    xf86PostButtonEvent(pInfo->dev, FALSE, 1, TRUE, 0, 0);
-                    xf86PostButtonEvent(pInfo->dev, FALSE, 1, FALSE, 0, 0);
+                    xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, TRUE, 0, 0);
+                    xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, FALSE, 0, 0);
                 }
             } else {
                 xf86Msg(X_ERROR, "No active prev_slot! slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
@@ -661,9 +660,9 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
             case ABS_TOOL_WIDTH:
             break;
             case ABS_MT_SLOT:
-            set_start_fields_if_not_set(&state->slots[state->current_slot_id], seconds, useconds);
+            set_start_fields_if_not_set(&state->slots[state->current_slot_id], time);
             state->current_slot_id = value;
-            activate_current_slot(state, seconds, useconds);
+            activate_current_slot(state, time);
             break;
             case ABS_MT_TOUCH_MAJOR:
             state->slots[state->current_slot_id].touch_major = value;
@@ -692,14 +691,14 @@ void process_event(InputInfoPtr pInfo, struct State *state, unsigned int seconds
                 state->active_slots--;
             } else {
                 state->active_slots++;
-                activate_current_slot(state, seconds, useconds);
+                activate_current_slot(state, time);
             }
             break;
         }
         break;
     }
     if (type != EV_SYN) {
-        xf86Msg(X_INFO, "data: %u %8u %6i %s\n", seconds, useconds, value, type_and_code_name(type, code));
+        xf86Msg(X_INFO, "data: %zu %8zu %6i %s\n", time->tv_sec, time->tv_usec, value, type_and_code_name(type, code));
     }
 }
 
@@ -719,7 +718,7 @@ static void RandomReadInput(InputInfoPtr pInfo)
                 break;
             }
         } else {
-            process_event(pInfo, &pRandom->state, ev.time.tv_sec, ev.time.tv_usec, ev.type, ev.code, ev.value);
+            process_event(pInfo, &pRandom->state, &ev.time, ev.type, ev.code, ev.value);
         }
     }
 }

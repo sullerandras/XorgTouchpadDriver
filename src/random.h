@@ -45,8 +45,7 @@ struct Slot {
     int width_minor;
     int orientation;
 
-    unsigned int start_seconds;
-    unsigned int start_useconds;
+    struct timeval start_time;
     int elapsed_useconds;
 
     int startx;
