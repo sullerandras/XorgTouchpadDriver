@@ -76,14 +76,18 @@ static int _random_init_buttons(DeviceIntPtr device);
 static int _random_init_axes(DeviceIntPtr device);
 
 const char *type_and_code_name(int type, int code);
+long long usec_diff(struct timeval *end, struct timeval *start);
 unsigned int elapsed_useconds(struct Slot *slot, struct timeval *time);
 void clear_state(struct State *state);
 void clear_slot(struct Slot *slot);
 void activate_current_slot(struct State *state, struct timeval *time);
 int get_active_slot_id(struct Slot slots[]);
+void get_2_active_slots(struct Slot slots[], struct Slot **slot1, struct Slot **slot2);
 int is_tap_click(struct Slot *slot);
 void set_start_fields_if_not_set(struct Slot *slot, struct timeval *time);
 void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, struct timeval *time);
+void update_touchpad_state(struct State *state, enum TouchpadStates new_state, struct timeval *time);
+void handle_2_finger_scroll(InputInfoPtr pInfo, struct State *state, struct Slot *slot1, struct Slot *slot2, struct Slot *prev_slot1, struct Slot *prev_slot2, struct timeval *time);
 void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value);
 
 /* random_driver_name[] fixes a gcc warning:
@@ -203,10 +207,11 @@ static void RandomUnInit(InputDriverPtr drv,
     {
         free(pRandom->device);
         pRandom->device = NULL;
-        /* Common error - pInfo->private must be NULL or valid memoy before
-         * passing into xf86DeleteInput */
-        pInfo->private = NULL;
     }
+    free(pInfo->private);
+    /* Common error - pInfo->private must be NULL or valid memoy before
+     * passing into xf86DeleteInput */
+    pInfo->private = NULL;
     xf86DeleteInput(pInfo, 0);
 }
 
@@ -421,17 +426,23 @@ const char *type_and_code_name(int type, int code) {
     }
     return "undefined";
 }
+long long usec_diff(struct timeval *end, struct timeval *start) {
+    return (end->tv_sec - start->tv_sec) * 1000000 + ((int) end->tv_usec - (int) start->tv_usec);
+}
 unsigned int elapsed_useconds(struct Slot *slot, struct timeval *time) {
     if (!slot->active) {
         return 0;
     }
-    return (time->tv_sec - slot->start_time.tv_sec) * 1000000 + (((int) time->tv_usec) - ((int) slot->start_time.tv_usec));
+    return usec_diff(time, &slot->start_time);
 }
 void clear_state(struct State *state) {
     int i;
     state->current_slot_id = 0;
     state->active_slots = 0;
     state->prev_active_slots = 0;
+    state->touchpad_state = TS_DEFAULT;
+    state->touchpad_state_updated_at.tv_sec = 0;
+    state->touchpad_state_updated_at.tv_usec = 0;
     for (i = 0; i < MAX_SLOTS; ++i) {
         clear_slot(&state->slots[i]);
         clear_slot(&state->prev_slots[i]);
@@ -477,6 +488,21 @@ int get_active_slot_id(struct Slot slots[]) {
     }
     xf86Msg(X_ERROR, "No active slot!\n");
     return -1;
+}
+void get_2_active_slots(struct Slot slots[], struct Slot **slot1, struct Slot **slot2) {
+    int i;
+    *slot1 = NULL;
+    *slot2 = NULL;
+    for (i = 0; i < MAX_SLOTS; ++i) {
+        if (slots[i].active) {
+            if (*slot1 == NULL) {
+                *slot1 = &slots[i];
+            } else {
+                *slot2 = &slots[i];
+                break;
+            }
+        }
+    }
 }
 int is_tap_click(struct Slot *slot) {
     if (!slot->active) {
@@ -547,60 +573,127 @@ void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, struct timeval *
         }
     }
 }
+void update_touchpad_state(struct State *state, enum TouchpadStates new_state, struct timeval *time) {
+    if (state->touchpad_state != new_state) {
+        state->touchpad_state = new_state;
+        state->touchpad_state_updated_at = *time;
+    }
+}
+void handle_2_finger_scroll(InputInfoPtr pInfo, struct State *state, struct Slot *slot1, struct Slot *slot2, struct Slot *prev_slot1, struct Slot *prev_slot2, struct timeval *time) {
+    int x, y, prevx, prevy, dx, dy, button, i;
+    double ddx, ddy;
+    set_start_fields_if_not_set(slot1, time);
+    set_start_fields_if_not_set(slot2, time);
+    x = (slot1->x + slot2->x) / 2;
+    y = (slot1->y + slot2->y) / 2;
+    prevx = (prev_slot1->x + prev_slot2->x) / 2;
+    prevy = (prev_slot1->y + prev_slot2->y) / 2;
+    ddx = (x - prevx) / 200.0;
+    ddy = (y - prevy) / 200.0;
+    slot1->ddx += ddx;
+    slot1->ddy += ddy;
+    slot2->ddx = slot1->ddx;
+    slot2->ddy = slot1->ddy;
+    dx = (int) slot1->ddx;
+    dy = (int) slot1->ddy;
+    if (abs(dx) > 5) {
+        dx = 0;
+    }
+    if (abs(dy) > 5) {
+        dy = 0;
+    }
+    if (dx != 0) {
+        xf86Msg(X_INFO, "Horizontal scroll %i\n", dx);
+        button = (dx > 0) ? MOUSE_HORIZONTAL_WHEEL_1_BUTTON : MOUSE_HORIZONTAL_WHEEL_2_BUTTON;
+        for (i = 0; i < abs(dx); ++i) {
+            xf86PostButtonEvent(pInfo->dev, FALSE, button, TRUE, 0, 0);
+            xf86PostButtonEvent(pInfo->dev, FALSE, button, FALSE, 0, 0);
+        }
+        slot1->ddx -= dx;
+        slot2->ddx = slot1->ddx;
+        update_touchpad_state(state, TS_2_FINGER_SCROLL, time);
+    }
+    if (dy != 0) {
+        xf86Msg(X_INFO, "Vertical scroll %i\n", dy);
+        button = (dy > 0) ? MOUSE_VERTICAL_WHEEL_1_BUTTON : MOUSE_VERTICAL_WHEEL_2_BUTTON;
+        for (i = 0; i < abs(dy); ++i) {
+            xf86PostButtonEvent(pInfo->dev, FALSE, button, TRUE, 0, 0);
+            xf86PostButtonEvent(pInfo->dev, FALSE, button, FALSE, 0, 0);
+        }
+        slot1->ddy -= dy;
+        slot2->ddy = slot1->ddy;
+        update_touchpad_state(state, TS_2_FINGER_SCROLL, time);
+    }
+}
 void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value) {
-    double touch_mul, width_mul;
-    double prev_touch_mul, prev_width_mul;
+    // double touch_mul, width_mul;
+    // double prev_touch_mul, prev_width_mul;
     int i;
-    struct Slot *slot;
-    struct Slot *prev_slot;
+    struct Slot *slot, *slot1, *slot2;
+    struct Slot *prev_slot, *prev_slot1, *prev_slot2;
 
     switch (type) {
         case EV_SYN:
-        // xf86Msg(X_INFO, "slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
-        //     state->slots[0].active ? "*" : "-", state->slots[0].x, state->slots[0].y, elapsed_millis(state->slots[0], seconds, useconds),
-        //     state->slots[1].active ? "*" : "-", state->slots[1].x, state->slots[1].y, elapsed_millis(state->slots[1], seconds, useconds),
-        //     state->slots[2].active ? "*" : "-", state->slots[2].x, state->slots[2].y, elapsed_millis(state->slots[2], seconds, useconds),
-        //     state->slots[3].active ? "*" : "-", state->slots[3].x, state->slots[3].y, elapsed_millis(state->slots[3], seconds, useconds),
-        //     state->slots[4].active ? "*" : "-", state->slots[4].x, state->slots[4].y, elapsed_millis(state->slots[4], seconds, useconds)
-        //     );
+        xf86Msg(X_INFO, "active: %i, slots: (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i)\n",
+            state->active_slots,
+            state->slots[0].active ? "*" : "-", state->slots[0].active ? state->slots[0].x : 0, state->slots[0].active ? state->slots[0].y : 0, state->slots[0].elapsed_useconds / 1000, state->slots[0].pressure,
+            state->slots[1].active ? "*" : "-", state->slots[1].active ? state->slots[1].x : 0, state->slots[1].active ? state->slots[1].y : 0, state->slots[1].elapsed_useconds / 1000, state->slots[1].pressure,
+            state->slots[2].active ? "*" : "-", state->slots[2].active ? state->slots[2].x : 0, state->slots[2].active ? state->slots[2].y : 0, state->slots[2].elapsed_useconds / 1000, state->slots[2].pressure,
+            state->slots[3].active ? "*" : "-", state->slots[3].active ? state->slots[3].x : 0, state->slots[3].active ? state->slots[3].y : 0, state->slots[3].elapsed_useconds / 1000, state->slots[3].pressure,
+            state->slots[4].active ? "*" : "-", state->slots[4].active ? state->slots[4].x : 0, state->slots[4].active ? state->slots[4].y : 0, state->slots[4].elapsed_useconds / 1000, state->slots[4].pressure
+            );
         for (i = 0; i < MAX_SLOTS; ++i) {
             state->slots[i].elapsed_useconds = elapsed_useconds(&state->slots[i], time);
         }
 
-        touch_mul      = state->slots[0].touch_major * state->slots[0].touch_minor;
-        width_mul      = state->slots[0].width_major * state->slots[0].width_minor;
-        prev_touch_mul = state->prev_slots[0].touch_major * state->prev_slots[0].touch_minor;
-        prev_width_mul = state->prev_slots[0].width_major * state->prev_slots[0].width_minor;
-        if (touch_mul == 0) {
-            touch_mul = 1;
-        }
-        if (width_mul == 0) {
-            width_mul = 1;
-        }
-        if (prev_touch_mul == 0) {
-            prev_touch_mul = touch_mul;
-        }
-        if (prev_width_mul == 0) {
-            prev_width_mul = width_mul;
-        }
-        xf86Msg(X_INFO, "active: %i, slot 0: (%s %i:%i (%3i:%3i) %umsec, pressure: %i, touch: %i/%i (%i d: %.2f%%), width: %i/%i (%i d: %.2f%%), o: %i)\n",
-            state->active_slots,
-            state->slots[0].active ? "*" : "-",
-            state->slots[0].x, state->slots[0].y,
-            state->slots[0].dx, state->slots[0].dy,
-            state->slots[0].elapsed_useconds / 1000,
-            state->slots[0].pressure,
-            state->slots[0].touch_major, state->slots[0].touch_minor, state->slots[0].touch_major * state->slots[0].touch_minor, 100.0 * ((state->slots[0].touch_major * state->slots[0].touch_minor) / prev_touch_mul),
-            state->slots[0].width_major, state->slots[0].width_minor, state->slots[0].width_major * state->slots[0].width_minor, 100.0 * ((state->slots[0].width_major * state->slots[0].width_minor) / prev_width_mul),
-            state->slots[0].orientation);
+        // touch_mul      = state->slots[0].touch_major * state->slots[0].touch_minor;
+        // width_mul      = state->slots[0].width_major * state->slots[0].width_minor;
+        // prev_touch_mul = state->prev_slots[0].touch_major * state->prev_slots[0].touch_minor;
+        // prev_width_mul = state->prev_slots[0].width_major * state->prev_slots[0].width_minor;
+        // if (touch_mul == 0) {
+        //     touch_mul = 1;
+        // }
+        // if (width_mul == 0) {
+        //     width_mul = 1;
+        // }
+        // if (prev_touch_mul == 0) {
+        //     prev_touch_mul = touch_mul;
+        // }
+        // if (prev_width_mul == 0) {
+        //     prev_width_mul = width_mul;
+        // }
+        // xf86Msg(X_INFO, "active: %i, slot 0: (%s %i:%i (%3i:%3i) %umsec, pressure: %i, touch: %i/%i (%i d: %.2f%%), width: %i/%i (%i d: %.2f%%), o: %i)\n",
+        //     state->active_slots,
+        //     state->slots[0].active ? "*" : "-",
+        //     state->slots[0].x, state->slots[0].y,
+        //     state->slots[0].dx, state->slots[0].dy,
+        //     state->slots[0].elapsed_useconds / 1000,
+        //     state->slots[0].pressure,
+        //     state->slots[0].touch_major, state->slots[0].touch_minor, state->slots[0].touch_major * state->slots[0].touch_minor, 100.0 * ((state->slots[0].touch_major * state->slots[0].touch_minor) / prev_touch_mul),
+        //     state->slots[0].width_major, state->slots[0].width_minor, state->slots[0].width_major * state->slots[0].width_minor, 100.0 * ((state->slots[0].width_major * state->slots[0].width_minor) / prev_width_mul),
+        //     state->slots[0].orientation);
         if (state->active_slots == 1) {
             i = get_active_slot_id(state->slots);
             slot = &state->slots[i];
             prev_slot = &state->prev_slots[i];
-            set_start_fields_if_not_set(slot, time);
-            calculate_dx_dy(slot, prev_slot, time);
-            if (slot->dx != 0 || slot->dy != 0) {
-                xf86PostMotionEvent(pInfo->dev, 0, 0, 2, slot->dx, slot->dy);
+
+            if (state->touchpad_state == TS_2_FINGER_SCROLL) {
+                update_touchpad_state(state, TS_2_FINGER_SCROLL_RELEASING, time);
+            } else if (state->touchpad_state == TS_2_FINGER_SCROLL_RELEASING) {
+                if (usec_diff(time, &state->touchpad_state_updated_at) < 100000) {
+                    // keep waiting
+                } else {
+                    update_touchpad_state(state, TS_DEFAULT, time);
+                    // overwrite the start position
+                    slot->startx = slot->x;
+                    slot->starty = slot->y;
+                }
+            } else {
+                set_start_fields_if_not_set(slot, time);
+                calculate_dx_dy(slot, prev_slot, time);
+                if (slot->dx != 0 || slot->dy != 0) {
+                    xf86PostMotionEvent(pInfo->dev, 0, 0, 2, slot->dx, slot->dy);
+                }
             }
         } else if (state->active_slots == 0 && state->prev_active_slots == 1) {
             i = get_active_slot_id(state->prev_slots);
@@ -618,6 +711,14 @@ void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time
                     state->prev_slots[3].active ? "*" : "-", state->prev_slots[3].x, state->prev_slots[3].y, state->prev_slots[3].elapsed_useconds/1000,
                     state->prev_slots[4].active ? "*" : "-", state->prev_slots[4].x, state->prev_slots[4].y, state->prev_slots[4].elapsed_useconds/1000
                     );
+            }
+        } else if (state->active_slots == 2 && state->prev_active_slots == 2) {
+            get_2_active_slots(state->slots, &slot1, &slot2);
+            if (slot1 != NULL && slot2 != NULL) {
+                get_2_active_slots(state->prev_slots, &prev_slot1, &prev_slot2);
+                if (prev_slot1 != NULL && prev_slot2 != NULL) {
+                    handle_2_finger_scroll(pInfo, state, slot1, slot2, prev_slot1, prev_slot2, time);
+                }
             }
         }
         state->prev_active_slots = state->active_slots;

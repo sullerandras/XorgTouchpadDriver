@@ -33,6 +33,13 @@
 #define MOUSE_HORIZONTAL_WHEEL_2_BUTTON 7
 
 #define MAX_SLOTS 5
+
+enum TouchpadStates {
+    TS_DEFAULT,
+    TS_2_FINGER_SCROLL, // there are 2 active slots
+    TS_2_FINGER_SCROLL_RELEASING, // previously there were 2 active slots but now only 1. Ignoring pointer movements for a short period to avoid accidental pointer movements after scrolling with 2 fingers
+};
+
 struct Slot {
     int slot_id;
     int active;
@@ -64,6 +71,8 @@ struct State {
     int current_slot_id;
     int active_slots;
     int prev_active_slots;
+    enum TouchpadStates touchpad_state;
+    struct timeval touchpad_state_updated_at;
 };
 
 typedef struct _RandomDeviceRec
