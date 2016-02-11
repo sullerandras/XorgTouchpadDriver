@@ -76,8 +76,8 @@ static int _random_init_buttons(DeviceIntPtr device);
 static int _random_init_axes(DeviceIntPtr device);
 
 const char *type_and_code_name(int type, int code);
-long long usec_diff(struct timeval *end, struct timeval *start);
-unsigned int elapsed_useconds(struct Slot *slot, struct timeval *time);
+time_t usec_diff(struct timeval *end, struct timeval *start);
+void calculate_elapsed_useconds_and_active_slots(struct State *state, struct timeval *time);
 void clear_state(struct State *state);
 void clear_slot(struct Slot *slot);
 void activate_current_slot(struct State *state, struct timeval *time);
@@ -87,7 +87,10 @@ int is_tap_click(struct Slot *slot);
 void set_start_fields_if_not_set(struct Slot *slot, struct timeval *time);
 void calculate_dx_dy(struct Slot *slot, struct Slot *prev_slot, struct timeval *time);
 void update_touchpad_state(struct State *state, enum TouchpadStates new_state, struct timeval *time);
+void debug_slots(struct State *state);
 void handle_2_finger_scroll(InputInfoPtr pInfo, struct State *state, struct Slot *slot1, struct Slot *slot2, struct Slot *prev_slot1, struct Slot *prev_slot2, struct timeval *time);
+void process_EV_SYN(InputInfoPtr pInfo, struct State *state, struct timeval *time);
+void save_current_values_to_prev(struct State *state);
 void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value);
 
 /* random_driver_name[] fixes a gcc warning:
@@ -426,14 +429,20 @@ const char *type_and_code_name(int type, int code) {
     }
     return "undefined";
 }
-long long usec_diff(struct timeval *end, struct timeval *start) {
+time_t usec_diff(struct timeval *end, struct timeval *start) {
     return (end->tv_sec - start->tv_sec) * 1000000 + ((int) end->tv_usec - (int) start->tv_usec);
 }
-unsigned int elapsed_useconds(struct Slot *slot, struct timeval *time) {
-    if (!slot->active) {
-        return 0;
+void calculate_elapsed_useconds_and_active_slots(struct State *state, struct timeval *time) {
+    int i;
+    state->active_slots = 0;
+    for (i = 0; i < MAX_SLOTS; ++i) {
+        if (state->slots[i].active) {
+            state->active_slots++;
+            state->slots[i].elapsed_useconds = usec_diff(time, &state->slots[i].start_time);
+        } else {
+            state->slots[i].elapsed_useconds = 0;
+        }
     }
-    return usec_diff(time, &slot->start_time);
 }
 void clear_state(struct State *state) {
     int i;
@@ -579,6 +588,43 @@ void update_touchpad_state(struct State *state, enum TouchpadStates new_state, s
         state->touchpad_state_updated_at = *time;
     }
 }
+void debug_slots(struct State *state) {
+    xf86Msg(X_INFO, "active: %i, slots: (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i)\n",
+        state->active_slots,
+        state->slots[0].active ? "*" : "-", state->slots[0].active ? state->slots[0].x : 0, state->slots[0].active ? state->slots[0].y : 0, state->slots[0].elapsed_useconds / 1000, state->slots[0].pressure,
+        state->slots[1].active ? "*" : "-", state->slots[1].active ? state->slots[1].x : 0, state->slots[1].active ? state->slots[1].y : 0, state->slots[1].elapsed_useconds / 1000, state->slots[1].pressure,
+        state->slots[2].active ? "*" : "-", state->slots[2].active ? state->slots[2].x : 0, state->slots[2].active ? state->slots[2].y : 0, state->slots[2].elapsed_useconds / 1000, state->slots[2].pressure,
+        state->slots[3].active ? "*" : "-", state->slots[3].active ? state->slots[3].x : 0, state->slots[3].active ? state->slots[3].y : 0, state->slots[3].elapsed_useconds / 1000, state->slots[3].pressure,
+        state->slots[4].active ? "*" : "-", state->slots[4].active ? state->slots[4].x : 0, state->slots[4].active ? state->slots[4].y : 0, state->slots[4].elapsed_useconds / 1000, state->slots[4].pressure
+        );
+
+    // touch_mul      = state->slots[0].touch_major * state->slots[0].touch_minor;
+    // width_mul      = state->slots[0].width_major * state->slots[0].width_minor;
+    // prev_touch_mul = state->prev_slots[0].touch_major * state->prev_slots[0].touch_minor;
+    // prev_width_mul = state->prev_slots[0].width_major * state->prev_slots[0].width_minor;
+    // if (touch_mul == 0) {
+    //     touch_mul = 1;
+    // }
+    // if (width_mul == 0) {
+    //     width_mul = 1;
+    // }
+    // if (prev_touch_mul == 0) {
+    //     prev_touch_mul = touch_mul;
+    // }
+    // if (prev_width_mul == 0) {
+    //     prev_width_mul = width_mul;
+    // }
+    // xf86Msg(X_INFO, "active: %i, slot 0: (%s %i:%i (%3i:%3i) %umsec, pressure: %i, touch: %i/%i (%i d: %.2f%%), width: %i/%i (%i d: %.2f%%), o: %i)\n",
+    //     state->active_slots,
+    //     state->slots[0].active ? "*" : "-",
+    //     state->slots[0].x, state->slots[0].y,
+    //     state->slots[0].dx, state->slots[0].dy,
+     //     state->slots[0].elapsed_useconds / 1000,
+    //     state->slots[0].pressure,
+    //     state->slots[0].touch_major, state->slots[0].touch_minor, state->slots[0].touch_major * state->slots[0].touch_minor, 100.0 * ((state->slots[0].touch_major * state->slots[0].touch_minor) / prev_touch_mul),
+    //     state->slots[0].width_major, state->slots[0].width_minor, state->slots[0].width_major * state->slots[0].width_minor, 100.0 * ((state->slots[0].width_major * state->slots[0].width_minor) / prev_width_mul),
+    //     state->slots[0].orientation);
+}
 void handle_2_finger_scroll(InputInfoPtr pInfo, struct State *state, struct Slot *slot1, struct Slot *slot2, struct Slot *prev_slot1, struct Slot *prev_slot2, struct timeval *time) {
     int x, y, prevx, prevy, dx, dy, button, i;
     double ddx, ddy;
@@ -625,106 +671,74 @@ void handle_2_finger_scroll(InputInfoPtr pInfo, struct State *state, struct Slot
         update_touchpad_state(state, TS_2_FINGER_SCROLL, time);
     }
 }
-void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value) {
-    // double touch_mul, width_mul;
-    // double prev_touch_mul, prev_width_mul;
+void process_EV_SYN(InputInfoPtr pInfo, struct State *state, struct timeval *time) {
     int i;
     struct Slot *slot, *slot1, *slot2;
     struct Slot *prev_slot, *prev_slot1, *prev_slot2;
+    if (state->active_slots == 1) {
+        i = get_active_slot_id(state->slots);
+        slot = &state->slots[i];
+        prev_slot = &state->prev_slots[i];
 
+        if (state->touchpad_state == TS_2_FINGER_SCROLL) {
+            update_touchpad_state(state, TS_2_FINGER_SCROLL_RELEASING, time);
+        } else if (state->touchpad_state == TS_2_FINGER_SCROLL_RELEASING) {
+            if (usec_diff(time, &state->touchpad_state_updated_at) < 100000) {
+                // keep waiting
+            } else {
+                update_touchpad_state(state, TS_DEFAULT, time);
+                // overwrite the start position
+                slot->startx = slot->x;
+                slot->starty = slot->y;
+            }
+        } else {
+            set_start_fields_if_not_set(slot, time);
+            calculate_dx_dy(slot, prev_slot, time);
+            if (slot->dx != 0 || slot->dy != 0) {
+                xf86PostMotionEvent(pInfo->dev, 0, 0, 2, slot->dx, slot->dy);
+            }
+        }
+    } else if (state->active_slots == 0 && state->prev_active_slots == 1) {
+        i = get_active_slot_id(state->prev_slots);
+        if (i >= 0) {
+            prev_slot = &state->prev_slots[i];
+            if (is_tap_click(prev_slot)) {
+                xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, TRUE, 0, 0);
+                xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, FALSE, 0, 0);
+            }
+        } else {
+            xf86Msg(X_ERROR, "No active prev_slot! slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
+                state->prev_slots[0].active ? "*" : "-", state->prev_slots[0].x, state->prev_slots[0].y, state->prev_slots[0].elapsed_useconds/1000,
+                state->prev_slots[1].active ? "*" : "-", state->prev_slots[1].x, state->prev_slots[1].y, state->prev_slots[1].elapsed_useconds/1000,
+                state->prev_slots[2].active ? "*" : "-", state->prev_slots[2].x, state->prev_slots[2].y, state->prev_slots[2].elapsed_useconds/1000,
+                state->prev_slots[3].active ? "*" : "-", state->prev_slots[3].x, state->prev_slots[3].y, state->prev_slots[3].elapsed_useconds/1000,
+                state->prev_slots[4].active ? "*" : "-", state->prev_slots[4].x, state->prev_slots[4].y, state->prev_slots[4].elapsed_useconds/1000
+                );
+        }
+    } else if (state->active_slots == 2 && state->prev_active_slots == 2) {
+        get_2_active_slots(state->slots, &slot1, &slot2);
+        if (slot1 != NULL && slot2 != NULL) {
+            get_2_active_slots(state->prev_slots, &prev_slot1, &prev_slot2);
+            if (prev_slot1 != NULL && prev_slot2 != NULL) {
+                handle_2_finger_scroll(pInfo, state, slot1, slot2, prev_slot1, prev_slot2, time);
+            }
+        }
+    }
+}
+void save_current_values_to_prev(struct State *state) {
+    int i;
+    state->prev_active_slots = state->active_slots;
+    for (i = 0; i < MAX_SLOTS; ++i) {
+        state->prev_slots[i] = state->slots[i];
+    }
+}
+void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time, int type, int code, int value) {
     switch (type) {
         case EV_SYN:
-        xf86Msg(X_INFO, "active: %i, slots: (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i) (%s %i:%i %ums %i)\n",
-            state->active_slots,
-            state->slots[0].active ? "*" : "-", state->slots[0].active ? state->slots[0].x : 0, state->slots[0].active ? state->slots[0].y : 0, state->slots[0].elapsed_useconds / 1000, state->slots[0].pressure,
-            state->slots[1].active ? "*" : "-", state->slots[1].active ? state->slots[1].x : 0, state->slots[1].active ? state->slots[1].y : 0, state->slots[1].elapsed_useconds / 1000, state->slots[1].pressure,
-            state->slots[2].active ? "*" : "-", state->slots[2].active ? state->slots[2].x : 0, state->slots[2].active ? state->slots[2].y : 0, state->slots[2].elapsed_useconds / 1000, state->slots[2].pressure,
-            state->slots[3].active ? "*" : "-", state->slots[3].active ? state->slots[3].x : 0, state->slots[3].active ? state->slots[3].y : 0, state->slots[3].elapsed_useconds / 1000, state->slots[3].pressure,
-            state->slots[4].active ? "*" : "-", state->slots[4].active ? state->slots[4].x : 0, state->slots[4].active ? state->slots[4].y : 0, state->slots[4].elapsed_useconds / 1000, state->slots[4].pressure
-            );
-        for (i = 0; i < MAX_SLOTS; ++i) {
-            state->slots[i].elapsed_useconds = elapsed_useconds(&state->slots[i], time);
-        }
-
-        // touch_mul      = state->slots[0].touch_major * state->slots[0].touch_minor;
-        // width_mul      = state->slots[0].width_major * state->slots[0].width_minor;
-        // prev_touch_mul = state->prev_slots[0].touch_major * state->prev_slots[0].touch_minor;
-        // prev_width_mul = state->prev_slots[0].width_major * state->prev_slots[0].width_minor;
-        // if (touch_mul == 0) {
-        //     touch_mul = 1;
-        // }
-        // if (width_mul == 0) {
-        //     width_mul = 1;
-        // }
-        // if (prev_touch_mul == 0) {
-        //     prev_touch_mul = touch_mul;
-        // }
-        // if (prev_width_mul == 0) {
-        //     prev_width_mul = width_mul;
-        // }
-        // xf86Msg(X_INFO, "active: %i, slot 0: (%s %i:%i (%3i:%3i) %umsec, pressure: %i, touch: %i/%i (%i d: %.2f%%), width: %i/%i (%i d: %.2f%%), o: %i)\n",
-        //     state->active_slots,
-        //     state->slots[0].active ? "*" : "-",
-        //     state->slots[0].x, state->slots[0].y,
-        //     state->slots[0].dx, state->slots[0].dy,
-        //     state->slots[0].elapsed_useconds / 1000,
-        //     state->slots[0].pressure,
-        //     state->slots[0].touch_major, state->slots[0].touch_minor, state->slots[0].touch_major * state->slots[0].touch_minor, 100.0 * ((state->slots[0].touch_major * state->slots[0].touch_minor) / prev_touch_mul),
-        //     state->slots[0].width_major, state->slots[0].width_minor, state->slots[0].width_major * state->slots[0].width_minor, 100.0 * ((state->slots[0].width_major * state->slots[0].width_minor) / prev_width_mul),
-        //     state->slots[0].orientation);
-        if (state->active_slots == 1) {
-            i = get_active_slot_id(state->slots);
-            slot = &state->slots[i];
-            prev_slot = &state->prev_slots[i];
-
-            if (state->touchpad_state == TS_2_FINGER_SCROLL) {
-                update_touchpad_state(state, TS_2_FINGER_SCROLL_RELEASING, time);
-            } else if (state->touchpad_state == TS_2_FINGER_SCROLL_RELEASING) {
-                if (usec_diff(time, &state->touchpad_state_updated_at) < 100000) {
-                    // keep waiting
-                } else {
-                    update_touchpad_state(state, TS_DEFAULT, time);
-                    // overwrite the start position
-                    slot->startx = slot->x;
-                    slot->starty = slot->y;
-                }
-            } else {
-                set_start_fields_if_not_set(slot, time);
-                calculate_dx_dy(slot, prev_slot, time);
-                if (slot->dx != 0 || slot->dy != 0) {
-                    xf86PostMotionEvent(pInfo->dev, 0, 0, 2, slot->dx, slot->dy);
-                }
-            }
-        } else if (state->active_slots == 0 && state->prev_active_slots == 1) {
-            i = get_active_slot_id(state->prev_slots);
-            if (i >= 0) {
-                prev_slot = &state->prev_slots[i];
-                if (is_tap_click(prev_slot)) {
-                    xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, TRUE, 0, 0);
-                    xf86PostButtonEvent(pInfo->dev, FALSE, MOUSE_LEFT_BUTTON, FALSE, 0, 0);
-                }
-            } else {
-                xf86Msg(X_ERROR, "No active prev_slot! slots: (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec) (%s %i:%i %umsec)\n",
-                    state->prev_slots[0].active ? "*" : "-", state->prev_slots[0].x, state->prev_slots[0].y, state->prev_slots[0].elapsed_useconds/1000,
-                    state->prev_slots[1].active ? "*" : "-", state->prev_slots[1].x, state->prev_slots[1].y, state->prev_slots[1].elapsed_useconds/1000,
-                    state->prev_slots[2].active ? "*" : "-", state->prev_slots[2].x, state->prev_slots[2].y, state->prev_slots[2].elapsed_useconds/1000,
-                    state->prev_slots[3].active ? "*" : "-", state->prev_slots[3].x, state->prev_slots[3].y, state->prev_slots[3].elapsed_useconds/1000,
-                    state->prev_slots[4].active ? "*" : "-", state->prev_slots[4].x, state->prev_slots[4].y, state->prev_slots[4].elapsed_useconds/1000
-                    );
-            }
-        } else if (state->active_slots == 2 && state->prev_active_slots == 2) {
-            get_2_active_slots(state->slots, &slot1, &slot2);
-            if (slot1 != NULL && slot2 != NULL) {
-                get_2_active_slots(state->prev_slots, &prev_slot1, &prev_slot2);
-                if (prev_slot1 != NULL && prev_slot2 != NULL) {
-                    handle_2_finger_scroll(pInfo, state, slot1, slot2, prev_slot1, prev_slot2, time);
-                }
-            }
-        }
-        state->prev_active_slots = state->active_slots;
-        for (i = 0; i < MAX_SLOTS; ++i) {
-            state->prev_slots[i] = state->slots[i];
-        }
+        calculate_elapsed_useconds_and_active_slots(state, time);
+        debug_slots(state);
+        process_EV_SYN(pInfo, state, time);
+        save_current_values_to_prev(state);
         break;
         case EV_KEY:
         switch (code) {
@@ -789,9 +803,7 @@ void process_event(InputInfoPtr pInfo, struct State *state, struct timeval *time
             case ABS_MT_TRACKING_ID:
             if (value < 0) {
                 clear_slot(&state->slots[state->current_slot_id]);
-                state->active_slots--;
             } else {
-                state->active_slots++;
                 activate_current_slot(state, time);
             }
             break;
