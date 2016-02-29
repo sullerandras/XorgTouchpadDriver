@@ -4,6 +4,8 @@ Simple X11 input driver for Apple MacBook Pro touchpad
 How to install
 --------------
 
+    sudo apt-get install autoconf automake libtool pkg-config xserver-xorg-dev xutils-dev libevdev-dev
+
     ./autogen.sh
     ./configure
     make
