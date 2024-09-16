@@ -45,7 +45,7 @@
 #define MOMENTUM_DELTA_LIMIT 0.2f
 #define MOMENTUM_DELTA_LIMIT_2X (2 * MOMENTUM_DELTA_LIMIT)
 
-#define MAX_SLOTS 5
+#define MAX_SLOTS 100
 
 enum TouchpadStates {
     TS_DEFAULT,
